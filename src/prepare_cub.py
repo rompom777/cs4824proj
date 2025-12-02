@@ -31,14 +31,30 @@ def load_cub_metadata(cub_root):
         split_txt, sep=" ", header=None, names=["image_id", "is_train"]
     )
 
+    # ---------- MANUAL PARSE FOR ATTRIBUTES ----------
     # attributes/image_attribute_labels.txt:
     # image_id attribute_id is_present certainty time
-    df_attr = pd.read_csv(
-        attr_txt,
-        sep=" ",
-        header=None,
-        names=["image_id", "attr_id", "is_present", "certainty", "time"],
+    # some lines have extra fields; we only care about the first 5
+    rows = []
+    with open(attr_txt, "r") as f:
+        for line in f:
+            parts = line.strip().split()
+            # skip weird empty lines, just in case
+            if len(parts) < 5:
+                continue
+            # take only the first 5 tokens even if more are present
+            image_id   = int(parts[0])
+            attr_id    = int(parts[1])
+            is_present = int(parts[2])
+            certainty  = int(parts[3])
+            time_val   = float(parts[4])
+            rows.append((image_id, attr_id, is_present, certainty, time_val))
+
+    df_attr = pd.DataFrame(
+        rows,
+        columns=["image_id", "attr_id", "is_present", "certainty", "time"]
     )
+    # ---------- END MANUAL PARSE ----------
 
     return df_images, df_labels, df_split, df_attr
 
@@ -50,15 +66,31 @@ def build_concept_matrix(df_attr, num_images, num_attributes=312):
     image_id in CUB goes from 1..N; attr_id goes 1..312.
     We'll convert to zero-based indices: image_id-1, attr_id-1.
     """
+    num_images = int(num_images)
+    num_attributes = int(num_attributes)
+
     # Initialize all zeros
     C = np.zeros((num_images, num_attributes), dtype=np.float32)
 
-    # We'll treat is_present == 1 as concept present, else 0.
     for _, row in df_attr.iterrows():
-        img_idx = row["image_id"] - 1
-        attr_idx = row["attr_id"] - 1
-        is_present = row["is_present"]
-        if is_present == 1:
+        # Force everything to int / float explicitly
+        try:
+            img_id = int(row["image_id"])
+            attr_id = int(row["attr_id"])
+            is_present = int(row["is_present"])
+        except Exception:
+            # skip any weird row
+            continue
+
+        img_idx = img_id - 1
+        attr_idx = attr_id - 1
+
+        # Guard against out-of-range indices just in case
+        if (
+            0 <= img_idx < num_images
+            and 0 <= attr_idx < num_attributes
+            and is_present == 1
+        ):
             C[img_idx, attr_idx] = 1.0
 
     return C
