@@ -129,7 +129,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--hidden_dim", type=int, default=64)
+    parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--out_dir", type=str, default="checkpoints_cub_c2y")
 
     args = parser.parse_args()
