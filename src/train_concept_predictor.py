@@ -1,4 +1,4 @@
-# src/train_baseline.py
+# src/train_concept_predictor.py
 
 import os
 import argparse
@@ -9,14 +9,19 @@ import torch.nn as nn
 import torch.optim as optim
 
 from src.datasets import make_dataloaders
-from src.models import LabelOnlyModel
+from src.models import ConceptPredictor
 
 
-def accuracy_from_logits(logits, targets):
-    preds = torch.argmax(logits, dim=1)
-    correct = (preds == targets).sum().item()
-    total = targets.size(0)
-    return correct / total
+def concept_accuracy_from_logits(logits, targets):
+    """
+    logits: [B, K]
+    targets: [B, K] (float 0/1)
+    Returns mean concept-wise accuracy over batch.
+    """
+    probs = torch.sigmoid(logits)
+    preds = (probs > 0.5).float()
+    correct = (preds == targets).float().mean().item()
+    return correct
 
 
 def train_one_epoch(model, loader, criterion, optimizer, device):
@@ -27,17 +32,17 @@ def train_one_epoch(model, loader, criterion, optimizer, device):
 
     for batch in tqdm(loader, desc="Train", leave=False):
         imgs = batch["image"].to(device)
-        labels = batch["label"].to(device)
+        concepts = batch["concepts"].to(device)  # [B, K] floats
 
         optimizer.zero_grad()
-        logits = model(imgs)
-        loss = criterion(logits, labels)
+        logits = model(imgs)  # [B, K]
+        loss = criterion(logits, concepts)
         loss.backward()
         optimizer.step()
 
-        batch_size = labels.size(0)
+        batch_size = concepts.size(0)
         running_loss += loss.item() * batch_size
-        running_acc += accuracy_from_logits(logits, labels) * batch_size
+        running_acc += concept_accuracy_from_logits(logits, concepts) * batch_size
         total += batch_size
 
     epoch_loss = running_loss / total
@@ -54,14 +59,14 @@ def eval_one_epoch(model, loader, criterion, device):
     with torch.inference_mode():
         for batch in tqdm(loader, desc="Val", leave=False):
             imgs = batch["image"].to(device)
-            labels = batch["label"].to(device)
+            concepts = batch["concepts"].to(device)
 
             logits = model(imgs)
-            loss = criterion(logits, labels)
+            loss = criterion(logits, concepts)
 
-            batch_size = labels.size(0)
+            batch_size = concepts.size(0)
             running_loss += loss.item() * batch_size
-            running_acc += accuracy_from_logits(logits, labels) * batch_size
+            running_acc += concept_accuracy_from_logits(logits, concepts) * batch_size
             total += batch_size
 
     epoch_loss = running_loss / total
@@ -85,9 +90,10 @@ def main(args):
 
     print(f"num_concepts={num_concepts}, num_classes={num_classes}")
 
-    model = LabelOnlyModel(num_classes=num_classes, pretrained=True).to(device)
+    model = ConceptPredictor(num_concepts=num_concepts, pretrained=True).to(device)
 
-    criterion = nn.CrossEntropyLoss()
+    # BCEWithLogitsLoss expects float targets in [0,1]
+    criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     best_val_acc = 0.0
@@ -98,26 +104,28 @@ def main(args):
         train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device)
         val_loss, val_acc = eval_one_epoch(model, val_loader, criterion, device)
 
-        print(f"Train loss: {train_loss:.4f}, acc: {train_acc:.4f}")
-        print(f"Val   loss: {val_loss:.4f}, acc: {val_acc:.4f}")
+        print(f"Train loss: {train_loss:.4f}, concept-acc: {train_acc:.4f}")
+        print(f"Val   loss: {val_loss:.4f}, concept-acc: {val_acc:.4f}")
 
-        # save best
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            ckpt_path = os.path.join(args.out_dir, "label_only_best.pt")
-            torch.save({
-                "model_state_dict": model.state_dict(),
-                "val_acc": val_acc,
-                "epoch": epoch,
-            }, ckpt_path)
-            print(f"Saved new best model to {ckpt_path}")
+            ckpt_path = os.path.join(args.out_dir, "concept_predictor_best.pt")
+            torch.save(
+                {
+                    "model_state_dict": model.state_dict(),
+                    "val_acc": val_acc,
+                    "epoch": epoch,
+                },
+                ckpt_path,
+            )
+            print(f"Saved new best concept predictor to {ckpt_path}")
 
-    # final test eval with best weights
-    ckpt = torch.load(os.path.join(args.out_dir, "label_only_best.pt"), map_location=device)
+    # final test eval
+    ckpt = torch.load(os.path.join(args.out_dir, "concept_predictor_best.pt"), map_location=device)
     model.load_state_dict(ckpt["model_state_dict"])
 
     test_loss, test_acc = eval_one_epoch(model, test_loader, criterion, device)
-    print(f"\nFinal TEST: loss={test_loss:.4f}, acc={test_acc:.4f}")
+    print(f"\nFinal TEST (concept predictor): loss={test_loss:.4f}, concept-acc={test_acc:.4f}")
 
 
 if __name__ == "__main__":
@@ -130,10 +138,10 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--img_size", type=int, default=224)
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--out_dir", type=str, default="checkpoints")
+    parser.add_argument("--out_dir", type=str, default="checkpoints_cub_concepts")
 
     args = parser.parse_args()
     main(args)
