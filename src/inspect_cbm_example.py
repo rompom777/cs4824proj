@@ -18,13 +18,14 @@ def explain_one_example(cbm, label_from_concepts, batch, attr_names, device, top
       - true label
       - predicted label
       - top-k concepts that contributed most to the prediction
+      - a few high-probability concepts regardless of weight
     """
     cbm.eval()
     label_from_concepts.eval()
 
     img     = batch["image"].to(device)          # [1, 3, H, W]
     true_y  = batch["label"].item()
-    true_c  = batch["concepts"][0].numpy()       # [K]
+    true_c  = batch["concepts"][0].numpy()       # [K] numpy array of 0/1 ground-truth concepts
 
     # Forward through CBM: image -> predicted concepts -> predicted label
     logits_y, c_hat, c_probs = cbm(img)          # logits_y [1,C], c_hat [1,K], c_probs [1,K]
@@ -36,20 +37,29 @@ def explain_one_example(cbm, label_from_concepts, batch, attr_names, device, top
     print(f"Predicted label prob:  {probs_y[pred_y]:.3f}")
     print()
 
-    # Get final linear layer weights for label_from_concepts
-    # Assuming LabelFromConcepts is something like nn.Sequential(...)
-    last_linear = None
-    for m in label_from_concepts.modules():
-        if isinstance(m, nn.Linear):
-            last_linear = m
-    assert last_linear is not None, "Could not find final linear layer in LabelFromConcepts"
+    # ---- Compute effective weights from concepts to logits for the predicted class ----
+    # We assume LabelFromConcepts is an MLP like:
+    #   Linear(num_concepts -> hidden_dim) -> ReLU -> Linear(hidden_dim -> num_classes)
+    # or possibly just a single Linear.
+    # We combine the linears as: W_eff = W2 @ W1  with shape [num_classes, num_concepts]
+    linears = [m for m in label_from_concepts.modules() if isinstance(m, nn.Linear)]
+    assert len(linears) >= 1, "Could not find linear layers in LabelFromConcepts"
 
-    # weight for the predicted class: [K]
-    w = last_linear.weight[pred_y].detach().cpu()      # [K]
-    c_probs_vec = c_probs[0].detach().cpu()           # [K]
+    if len(linears) == 1:
+        # Simple logistic regression: [num_classes, num_concepts]
+        W_eff = linears[0].weight.detach().cpu()
+    else:
+        # Two-layer MLP (we only care about first and last Linear)
+        W1 = linears[0].weight.detach().cpu()    # [hidden_dim, num_concepts]
+        W2 = linears[-1].weight.detach().cpu()   # [num_classes, hidden_dim]
+        W_eff = W2 @ W1                          # [num_classes, num_concepts]
 
-    # Contribution score: weight * prob (simple heuristic)
-    contributions = w * c_probs_vec                   # [K]
+    # Row for the predicted class: [num_concepts]
+    w = W_eff[pred_y]                            # [K]
+    c_probs_vec = c_probs[0].detach().cpu()      # [K]
+
+    # Simple contribution heuristic: weight * probability
+    contributions = w * c_probs_vec              # [K]
 
     # Sort concepts by contribution
     K = contributions.shape[0]
